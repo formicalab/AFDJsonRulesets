@@ -1,0 +1,8 @@
+# Ruleset Mapping File
+# Format: OldRuleSetName=NewRuleSetName
+# Lines starting with # are comments
+
+Azure20Roma80=NEWAzure20Roma80
+Azure10Roma90=NEWAzure10Roma90
+Bilanciamento1=NEWBilanciamento1
+Bilanciamento2=NEWBilanciamento2
