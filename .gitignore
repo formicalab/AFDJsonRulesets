@@ -1,0 +1,5 @@
+# Ignore all JSON files (ARM templates, exports, backups)
+*.json
+
+# Allow the Tests folder mapping file if needed in future
+# !Tests/*.txt

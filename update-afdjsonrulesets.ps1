@@ -324,6 +324,33 @@ try {
     Write-Host $ruleSetCount -ForegroundColor Cyan -NoNewline
     Write-Host " rule set(s)"
 
+    # If mapping file is provided, filter to only include rulesets in the mapping
+    # This ensures the ARM template only contains the rulesets we want to duplicate
+    # Unmapped rulesets are skipped - they won't be affected by the deployment (incremental mode)
+    if ($RuleSetMappingFile -and $ruleSetMapping.Count -gt 0) {
+        $originalCount = $ruleSetCount
+        $mappedRuleSets = @()
+        foreach ($ruleSet in $ruleSets) {
+            if ($ruleSetMapping.ContainsKey($ruleSet.Name)) {
+                $mappedRuleSets += $ruleSet
+            }
+            else {
+                Write-Host "  ⏭️  Skipping unmapped rule set: " -NoNewline
+                Write-Host $ruleSet.Name -ForegroundColor DarkGray
+            }
+        }
+        $ruleSets = $mappedRuleSets
+        $ruleSetCount = $mappedRuleSets.Count
+        
+        if ($originalCount -ne $ruleSetCount) {
+            Write-Host "✅ Filtered to " -NoNewline -ForegroundColor Green
+            Write-Host $ruleSetCount -ForegroundColor Cyan -NoNewline
+            Write-Host " mapped rule set(s) (excluded " -NoNewline
+            Write-Host ($originalCount - $ruleSetCount) -ForegroundColor DarkGray -NoNewline
+            Write-Host " unmapped)"
+        }
+    }
+
     # Get detailed information for each rule set including rules
     $detailedRuleSets = @()
     
