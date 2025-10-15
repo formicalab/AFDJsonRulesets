@@ -10,6 +10,7 @@ This script connects to an Azure Front Door Standard/Premium profile and extract
 - Extracts complete ruleset configurations including all rules
 - Generates deployable ARM templates with proper dependencies
 - Supports automatic ruleset renaming via mapping files
+- **Smart filtering**: When using a mapping file, only exports mapped rulesets (others are automatically skipped)
 - Allows selective exclusion of rulesets (useful to avoid duplicates)
 - Includes cleanup mode to safely remove deployed rulesets
 
@@ -34,6 +35,7 @@ Azure20Roma80=NEWAzure20Roma80
 Azure10Roma90=NEWAzure10Roma90
 Bilanciamento1=NEWBilanciamento1
 ```
+**Note**: When you provide a mapping file, the script automatically exports ONLY the rulesets listed in the mapping. Unmapped rulesets are skipped, keeping your ARM template focused and clean.
 
 ### Basic Workflow
 ```powershell
