@@ -1,13 +1,21 @@
 #Requires -PSEdition Core
 <#
 .SYNOPSIS
-    Extracts Azure Front Door Standard/Premium rulesets in deployable JSON format.
+    Extracts Azure Front Door Standard/Premium rulesets and generates deployable ARM template JSON.
 
 .DESCRIPTION
-    This script retrieves an Azure Front Door Standard/Premium profile, validates it,
-    and exports its configuration as JSON with only the rulesets preserved.
-    The resulting JSON can be used to deploy a duplicate set of rulesets with different names
-    but identical configurations to the source rulesets.
+    This script retrieves an Azure Front Door Standard/Premium profile, extracts all rulesets
+    and their rules, then generates a complete ARM template for deploying duplicate rulesets.
+    The script supports automatic ruleset renaming via mapping files, exclusion of specific
+    rulesets, and generates a deployable JSON template with proper dependencies and ARM syntax.
+    
+    Key Features:
+    - Extracts complete ruleset configurations including all rules, conditions, and actions
+    - Automatically converts Azure PowerShell objects to ARM template format
+    - Supports ruleset renaming through mapping files for safe deployment
+    - Allows exclusion of specific rulesets (useful to avoid duplicates)
+    - Generates ARM template with proper resource dependencies
+    - Provides detailed validation and deployment guidance
 
 .PARAMETER FrontDoorName
     The name of the Azure Front Door Standard/Premium profile.
@@ -29,20 +37,47 @@
     Optional. Array of ruleset names to exclude from the export.
     Useful to avoid duplicates when re-exporting after previous deployments.
 
-.EXAMPLE
-    .\get-afdjsonrulesets.ps1 -FrontDoorName "myafd" -ResourceGroupName "myRG"
+.PARAMETER CleanupMode
+    Optional. Switch to enable cleanup mode. When specified, the script will DELETE rulesets
+    from Azure Front Door based on the NEW names specified in the RuleSetMappingFile.
+    Requires RuleSetMappingFile parameter. Prompts for confirmation before deletion.
+    Use this to remove previously deployed rulesets.
 
 .EXAMPLE
-    .\get-afdjsonrulesets.ps1 -FrontDoorName "myafd" -ResourceGroupName "myRG" -OutputPath ".\rulesets.json"
+    .\update-afdjsonrulesets.ps1 -FrontDoorName "myafd" -ResourceGroupName "myRG"
+    
+    Extracts all rulesets from the specified Front Door profile and outputs the ARM template JSON to console.
 
 .EXAMPLE
-    .\get-afdjsonrulesets.ps1 -FrontDoorName "myafd" -ResourceGroupName "myRG" -SubscriptionName "Production"
+    .\update-afdjsonrulesets.ps1 -FrontDoorName "myafd" -ResourceGroupName "myRG" -OutputPath ".\rulesets.json"
+    
+    Extracts rulesets and saves the ARM template to a JSON file.
 
 .EXAMPLE
-    .\get-afdjsonrulesets.ps1 -FrontDoorName "myafd" -ResourceGroupName "myRG" -RuleSetMappingFile ".\mapping.txt" -OutputPath ".\rulesets.json"
+    .\update-afdjsonrulesets.ps1 -FrontDoorName "myafd" -ResourceGroupName "myRG" -SubscriptionName "Production"
+    
+    Extracts rulesets from a specific Azure subscription context.
 
 .EXAMPLE
-    .\get-afdjsonrulesets.ps1 -FrontDoorName "myafd" -ResourceGroupName "myRG" -ExcludeRuleSets @("NEW*") -OutputPath ".\rulesets.json"
+    .\update-afdjsonrulesets.ps1 -FrontDoorName "myafd" -ResourceGroupName "myRG" -RuleSetMappingFile ".\Tests\ruleset-mapping.txt" -OutputPath ".\rulesets.json"
+    
+    Extracts rulesets and automatically renames them according to the mapping file before generating the ARM template.
+
+.EXAMPLE
+    .\update-afdjsonrulesets.ps1 -FrontDoorName "myafd" -ResourceGroupName "myRG" -ExcludeRuleSets @("NEW*") -OutputPath ".\rulesets.json"
+    
+    Extracts rulesets but excludes any ruleset whose name starts with "NEW" (useful to avoid duplicates).
+
+.EXAMPLE
+    .\update-afdjsonrulesets.ps1 -FrontDoorName "myafd" -ResourceGroupName "myRG" -ExcludeRuleSets @("NEW*", "TestRuleset") -RuleSetMappingFile ".\mapping.txt" -OutputPath ".\production-rulesets.json"
+    
+    Advanced usage: Excludes specific rulesets by name and pattern, applies name mappings, and saves to a specific file.
+
+.EXAMPLE
+    .\update-afdjsonrulesets.ps1 -FrontDoorName "myafd" -ResourceGroupName "myRG" -RuleSetMappingFile ".\Tests\ruleset-mapping.txt" -CleanupMode
+    
+    Cleanup mode: Removes rulesets from Azure Front Door based on the NEW names in the mapping file.
+    Prompts for confirmation before deletion. Use this to clean up previously deployed rulesets.
 #>
 
 [CmdletBinding()]
@@ -63,13 +98,22 @@ param(
     [string]$RuleSetMappingFile,
 
     [Parameter(Mandatory = $false, HelpMessage = 'Array of ruleset names or patterns to exclude (supports wildcards)')]
-    [string[]]$ExcludeRuleSets
+    [string[]]$ExcludeRuleSets,
+
+    [Parameter(Mandatory = $false, HelpMessage = 'Cleanup mode: removes rulesets specified in the mapping file (uses new names from mapping)')]
+    [switch]$CleanupMode
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 try {
+    # Validate parameters for cleanup mode
+    if ($CleanupMode -and -not $RuleSetMappingFile) {
+        Write-Host "❌ " -NoNewline -ForegroundColor Red
+        Write-Error "CleanupMode requires RuleSetMappingFile parameter to be specified"
+    }
+
     # Load ruleset mapping if provided
     $ruleSetMapping = @{}
     if ($RuleSetMappingFile) {
@@ -113,6 +157,106 @@ try {
     $currentContext = Get-AzContext
     Write-Host "Working in subscription: " -NoNewline
     Write-Host $currentContext.Subscription.Name -ForegroundColor Cyan
+
+    # CLEANUP MODE: Delete rulesets based on mapping file
+    if ($CleanupMode) {
+        Write-Host "`n" -NoNewline
+        Write-Host "🧹 CLEANUP MODE ACTIVATED" -ForegroundColor Yellow
+        Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor DarkGray
+        Write-Host ""
+        
+        # Get the new ruleset names from the mapping
+        $rulesetsToDelete = $ruleSetMapping.Values | Sort-Object
+        
+        if ($rulesetsToDelete.Count -eq 0) {
+            Write-Host "⚠️  " -NoNewline -ForegroundColor Yellow
+            Write-Warning "No rulesets found in mapping file to delete"
+            exit 0
+        }
+        
+        Write-Host "The following rulesets will be DELETED from Front Door profile: " -NoNewline
+        Write-Host $FrontDoorName -ForegroundColor Cyan
+        Write-Host ""
+        foreach ($rulesetName in $rulesetsToDelete) {
+            Write-Host "  🗑️  " -NoNewline
+            Write-Host $rulesetName -ForegroundColor Red
+        }
+        Write-Host ""
+        Write-Host "⚠️  WARNING: This action cannot be undone!" -ForegroundColor Yellow
+        Write-Host ""
+        
+        # Prompt for confirmation
+        $confirmation = Read-Host "Type 'DELETE' to confirm deletion, or anything else to cancel"
+        
+        if ($confirmation -ne 'DELETE') {
+            Write-Host ""
+            Write-Host "✅ Cleanup cancelled by user" -ForegroundColor Green
+            Write-Host ""
+            exit 0
+        }
+        
+        Write-Host ""
+        Write-Host "Starting deletion process..." -ForegroundColor Yellow
+        Write-Host ""
+        
+        $successCount = 0
+        $failCount = 0
+        $notFoundCount = 0
+        
+        foreach ($rulesetName in $rulesetsToDelete) {
+            Write-Host "Processing: " -NoNewline
+            Write-Host $rulesetName -ForegroundColor Cyan
+            
+            try {
+                # Check if ruleset exists
+                $existingRuleset = Get-AzFrontDoorCdnRuleSet -ProfileName $FrontDoorName -ResourceGroupName $ResourceGroupName -RuleSetName $rulesetName -ErrorAction SilentlyContinue
+                
+                if (-not $existingRuleset) {
+                    Write-Host "  ⚠️  Ruleset not found (already deleted or never existed)" -ForegroundColor Yellow
+                    $notFoundCount++
+                    continue
+                }
+                
+                # Delete the ruleset
+                Write-Host "  🗑️  Deleting ruleset..." -NoNewline
+                Remove-AzFrontDoorCdnRuleSet -ProfileName $FrontDoorName -ResourceGroupName $ResourceGroupName -RuleSetName $rulesetName -ErrorAction Stop
+                Write-Host " ✅ Deleted successfully" -ForegroundColor Green
+                $successCount++
+            }
+            catch {
+                Write-Host " ❌ Failed" -ForegroundColor Red
+                Write-Host "     Error: $($_.Exception.Message)" -ForegroundColor Red
+                $failCount++
+            }
+            Write-Host ""
+        }
+        
+        # Summary
+        Write-Host "CLEANUP SUMMARY"
+        Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor DarkGray
+        Write-Host "  Total rulesets in mapping : " -NoNewline
+        Write-Host $rulesetsToDelete.Count -ForegroundColor Cyan
+        Write-Host "  Successfully deleted       : " -NoNewline
+        Write-Host $successCount -ForegroundColor Green
+        Write-Host "  Not found                  : " -NoNewline
+        Write-Host $notFoundCount -ForegroundColor Yellow
+        Write-Host "  Failed                     : " -NoNewline
+        Write-Host $failCount -ForegroundColor Red
+        Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor DarkGray
+        
+        if ($failCount -gt 0) {
+            Write-Host ""
+            Write-Host "⚠️  Some rulesets failed to delete. Check error messages above." -ForegroundColor Yellow
+            exit 1
+        }
+        else {
+            Write-Host ""
+            Write-Host "✅ Cleanup completed successfully!" -ForegroundColor Green
+            Write-Host ""
+        }
+        
+        exit 0
+    }
 
     # Get the Front Door profile (Get-AzFrontDoorCdnProfile only retrieves Standard/Premium profiles)
     Write-Host "Retrieving Front Door profile: " -NoNewline
@@ -216,7 +360,7 @@ try {
             description = "Azure Front Door rule sets export from profile: $FrontDoorName"
             exportDate  = (Get-Date -Format 'yyyy-MM-ddTHH:mm:ssZ')
             sourceSku   = $sku
-            comments    = 'Generated by get-afdjsonrulesets.ps1 - Rename rule sets before deploying'
+            comments    = 'Generated by update-afdjsonrulesets.ps1 - ARM template for ruleset deployment'
         }
         parameters     = [PSCustomObject]@{
             profileName = [PSCustomObject]@{
@@ -496,7 +640,7 @@ try {
         Write-Host $OutputPath -ForegroundColor Cyan
     } else {
         Write-Host "  1. Save the JSON output to a file (copy from above or re-run with -OutputPath):"
-        Write-Host "      .\get-afdjsonrulesets.ps1 -FrontDoorName '$FrontDoorName' -ResourceGroupName '$ResourceGroupName' -OutputPath '.\$FrontDoorName-rulesets.json'" -ForegroundColor Gray
+        Write-Host "      .\update-afdjsonrulesets.ps1 -FrontDoorName '$FrontDoorName' -ResourceGroupName '$ResourceGroupName' -OutputPath '.\$FrontDoorName-rulesets.json'" -ForegroundColor Gray
     }
     if ($ruleSetMapping.Count -gt 0) {
         Write-Host "  2. " -NoNewline
